@@ -4996,7 +4996,9 @@ version = "0.1.2"
 dependencies = [
  "anyhow",
  "clap",
+ "logos-blockchain-config",
  "logos-blockchain-core",
+ "logos-blockchain-groth16",
  "logos-blockchain-key-management-system-keys",
  "logos-blockchain-node",
  "num-bigint",
@@ -5004,6 +5006,7 @@ dependencies = [
  "serde_json",
  "serde_yml",
  "thiserror 2.0.18",
+ "time",
 ]
 
 [[package]]

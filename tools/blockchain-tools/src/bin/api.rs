@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use clap::{Parser, Subcommand};
 use lb_common_http_client::{BasicAuthCredentials, CommonHttpClient};
 use lb_core::{
@@ -70,9 +70,6 @@ struct PostBlendDeclarationArgs {
     #[arg(long)]
     user_config_path: PathBuf,
 
-    #[arg(long, value_parser = parse_hex_serde::<ZkPublicKey>)]
-    zk_id: ZkPublicKey,
-
     #[arg(long, value_parser = parse_hex_serde::<NoteId>)]
     locked_note_id: NoteId,
 
@@ -102,7 +99,6 @@ async fn post_blend_declaration(
         locked_note_id,
         node_address,
         user_config_path,
-        zk_id,
         username,
         password,
     }: PostBlendDeclarationArgs,
@@ -116,7 +112,8 @@ async fn post_blend_declaration(
                 )
             })?;
 
-    let provider_id = extract_blend_provider_id(&user_config)?;
+    let ExtractedUserConfigValues { provider_id, zk_id } = extract_values(&user_config)
+        .with_context(|| "Failed to extract necessary values from user config")?;
 
     let declaration = DeclarationMessage {
         locators: vec![Locator::new(locator)],
@@ -140,6 +137,21 @@ async fn post_blend_declaration(
     Ok(())
 }
 
+struct ExtractedUserConfigValues {
+    provider_id: ProviderId,
+    zk_id: ZkPublicKey,
+}
+
+fn extract_values(config: &UserConfig) -> Result<ExtractedUserConfigValues> {
+    let provider_id = extract_blend_provider_id(config)
+        .with_context(|| "Failed to extract provider ID from provided config.")?;
+
+    let zk_id = extract_blend_zk_id(config)
+        .with_context(|| "Failed to extract zk ID from provided config.")?;
+
+    Ok(ExtractedUserConfigValues { provider_id, zk_id })
+}
+
 fn extract_blend_provider_id(config: &UserConfig) -> Result<ProviderId> {
     let key_id = &config.blend.non_ephemeral_signing_key_id;
     let key =
@@ -147,7 +159,21 @@ fn extract_blend_provider_id(config: &UserConfig) -> Result<ProviderId> {
             format!("blend non-ephemeral signing key '{key_id}' not found in KMS")
         })?;
     let Key::Ed25519(secret_key) = key else {
-        anyhow::bail!("blend non-ephemeral signing key must be Ed25519");
+        bail!("blend non-ephemeral signing key must be Ed25519");
     };
     Ok(ProviderId(secret_key.public_key()))
+}
+
+fn extract_blend_zk_id(config: &UserConfig) -> Result<ZkPublicKey> {
+    let key_id = &config.blend.core.zk.secret_key_kms_id;
+    let key = config
+        .kms
+        .backend
+        .keys
+        .get(key_id)
+        .with_context(|| format!("blend zk signing key '{key_id}' not found in KMS"))?;
+    let Key::Zk(secret_key) = key else {
+        bail!("Blend zk signing key must be Zk");
+    };
+    Ok(secret_key.to_public_key())
 }

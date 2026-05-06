@@ -4367,6 +4367,7 @@ dependencies = [
 name = "logos-blockchain-common-http-client"
 version = "0.1.2"
 dependencies = [
+ "axum",
  "futures",
  "hex",
  "logos-blockchain-chain-broadcast-service",
@@ -4379,6 +4380,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "tokio",
  "url",
 ]
 

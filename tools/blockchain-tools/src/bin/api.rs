@@ -7,8 +7,8 @@ use lb_core::{
     mantle::NoteId,
     sdp::{DeclarationMessage, Locator, ProviderId, ServiceType},
 };
+use lb_http_api_common::bodies::wallet::balance::WalletBalanceResponseBody;
 use lb_key_management_system_keys::keys::{Key, ZkPublicKey};
-use lb_libp2p::Multiaddr;
 use lb_node::config::{OnUnknownKeys, UserConfig, deserialize_config_at_path};
 use serde::{Deserialize, de::IntoDeserializer as _};
 use url::Url;
@@ -34,7 +34,6 @@ impl Cli {
 
 #[derive(Debug, Subcommand)]
 enum CliCommand {
-    /// Service Declaration Protocol commands
     Sdp {
         #[command(subcommand)]
         command: SdpSubCommand,
@@ -65,9 +64,6 @@ impl SdpSubCommand {
 #[derive(Debug, Parser)]
 struct PostBlendDeclarationArgs {
     #[arg(long)]
-    locator: Multiaddr,
-
-    #[arg(long)]
     user_config_path: PathBuf,
 
     #[arg(long, value_parser = parse_hex_serde::<NoteId>)]
@@ -95,7 +91,6 @@ where
 
 async fn post_blend_declaration(
     PostBlendDeclarationArgs {
-        locator,
         locked_note_id,
         node_address,
         user_config_path,
@@ -107,25 +102,31 @@ async fn post_blend_declaration(
         deserialize_config_at_path::<UserConfig>(&user_config_path, OnUnknownKeys::Fail)
             .with_context(|| {
                 format!(
-                    "failed to read user config at '{}'",
+                    "Failed to read user config at '{}'",
                     user_config_path.display()
                 )
             })?;
 
-    let ExtractedUserConfigValues { provider_id, zk_id } = extract_values(&user_config)
+    let client = {
+        let credentials = username.map(|u| BasicAuthCredentials::new(u, password));
+        CommonHttpClient::new(credentials)
+    };
+
+    let ExtractedUserConfigValues {
+        provider_id,
+        zk_id,
+        locked_note_id,
+        locator,
+    } = extract_values(&client, node_address.clone(), &user_config, locked_note_id)
+        .await
         .with_context(|| "Failed to extract necessary values from user config")?;
 
     let declaration = DeclarationMessage {
-        locators: vec![Locator::new(locator)],
+        locators: vec![locator],
         locked_note_id,
         provider_id,
         service_type: ServiceType::BlendNetwork,
         zk_id,
-    };
-
-    let client = {
-        let credentials = username.map(|u| BasicAuthCredentials::new(u, password));
-        CommonHttpClient::new(credentials)
     };
 
     let declaration_id = client
@@ -133,33 +134,54 @@ async fn post_blend_declaration(
         .await
         .context("Failed to post declaration")?;
 
-    println!("{declaration_id}");
+    println!("Declaration posted successfully: {declaration_id}");
     Ok(())
 }
 
 struct ExtractedUserConfigValues {
     provider_id: ProviderId,
     zk_id: ZkPublicKey,
+    locked_note_id: NoteId,
+    locator: Locator,
 }
 
-fn extract_values(config: &UserConfig) -> Result<ExtractedUserConfigValues> {
+async fn extract_values(
+    client: &CommonHttpClient,
+    node_address: Url,
+    config: &UserConfig,
+    locked_note_id: NoteId,
+) -> Result<ExtractedUserConfigValues> {
+    let locator = extract_blend_locator(config);
+
     let provider_id = extract_blend_provider_id(config)
         .with_context(|| "Failed to extract provider ID from provided config.")?;
 
     let zk_id = extract_blend_zk_id(config)
         .with_context(|| "Failed to extract zk ID from provided config.")?;
 
-    Ok(ExtractedUserConfigValues { provider_id, zk_id })
+    verify_locked_note_id_value(client, node_address, zk_id, locked_note_id).await?;
+
+    Ok(ExtractedUserConfigValues {
+        provider_id,
+        zk_id,
+        locked_note_id,
+        locator,
+    })
+}
+
+fn extract_blend_locator(config: &UserConfig) -> Locator {
+    let listening_address = config.blend.core.backend.listening_address.clone();
+    Locator::new(listening_address)
 }
 
 fn extract_blend_provider_id(config: &UserConfig) -> Result<ProviderId> {
     let key_id = &config.blend.non_ephemeral_signing_key_id;
     let key =
         config.kms.backend.keys.get(key_id).with_context(|| {
-            format!("blend non-ephemeral signing key '{key_id}' not found in KMS")
+            format!("Blend non-ephemeral signing key '{key_id}' not found in KMS")
         })?;
     let Key::Ed25519(secret_key) = key else {
-        bail!("blend non-ephemeral signing key must be Ed25519");
+        bail!("Blend non-ephemeral signing key must be Ed25519");
     };
     Ok(ProviderId(secret_key.public_key()))
 }
@@ -171,9 +193,30 @@ fn extract_blend_zk_id(config: &UserConfig) -> Result<ZkPublicKey> {
         .backend
         .keys
         .get(key_id)
-        .with_context(|| format!("blend zk signing key '{key_id}' not found in KMS"))?;
+        .with_context(|| format!("Blend ZK signing key '{key_id}' not found in KMS"))?;
     let Key::Zk(secret_key) = key else {
-        bail!("Blend zk signing key must be Zk");
+        bail!("Blend ZK signing key must be Zk");
     };
     Ok(secret_key.to_public_key())
+}
+
+async fn verify_locked_note_id_value(
+    client: &CommonHttpClient,
+    node_address: Url,
+    zk_id: ZkPublicKey,
+    locked_note_id: NoteId,
+) -> Result<()> {
+    let WalletBalanceResponseBody { notes, .. } = client
+        .get_wallet_balance(node_address, zk_id, None)
+        .await
+        .context("Failed to fetch wallet balance for Blend ZK ID")?;
+
+    // TODO: Harden this check by making sure the value of the locked note is at
+    // least as large as the required minimum stake for Blend.
+    if !notes.contains_key(&locked_note_id) {
+        bail!(
+            "Locked note ID '{locked_note_id:?}' was not found in wallet notes for provided Blend ZK ID",
+        );
+    }
+    Ok(())
 }

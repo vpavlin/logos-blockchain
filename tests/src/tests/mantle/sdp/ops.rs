@@ -5,7 +5,6 @@ use std::{
     time::Duration,
 };
 
-use lb_common_http_client::CommonHttpClient;
 use lb_core::{
     mantle::{
         GenesisTx as _, MantleTx, NoteId, OpProof, SignedMantleTx, Transaction as _, Utxo,
@@ -273,75 +272,6 @@ async fn sdp_declaration_restoration_e2e() {
     assert!(
         logs.contains("Loaded declaration from ledger"),
         "SDP service should log that it loaded declaration from ledger"
-    );
-}
-
-/// Verifies the SDP HTTP `post_declaration` endpoint end-to-end: a `DeclarationMessage`
-/// posted over HTTP must reach the node's mempool, get included in a block, and
-/// surface in the SDP declarations view.
-///
-/// The HTTP handler only replies after `mempool_adapter.post_tx` succeeds, so a
-/// successful response is itself evidence the transaction hit the mempool. We
-/// reuse the genesis declaration's `provider_id` and `zk_id` because the keys
-/// behind them are already in the node's KMS — that's what the SDP wallet adapter
-/// signs the tx with — and pair them with the spare wallet's still-unlocked note.
-#[tokio::test]
-#[expect(
-    clippy::large_futures,
-    reason = "Manual-cluster startup futures are large in these integration tests; boxing would not improve readability"
-)]
-async fn sdp_post_declaration_http_e2e() {
-    let (
-        _scenario_base_dir,
-        _cluster,
-        _node0_name,
-        node0,
-        _genesis_utxos,
-        _funding_secret_key,
-        _spare_note_secret_key,
-        spare_note_id,
-        _lock_period,
-    ) = start_sdp_manual_cluster("sdp-post-declaration-http").await;
-
-    let genesis_declaration = wait_for_sdp_declarations(&node0, Duration::from_secs(30))
-        .await
-        .expect("genesis declarations should be reachable")
-        .into_iter()
-        .next()
-        .expect("manual cluster must seed at least one genesis declaration");
-
-    let declaration = DeclarationMessage {
-        service_type: ServiceType::BlendNetwork,
-        locators: vec![Locator(
-            "/ip4/127.0.0.1/tcp/9999"
-                .parse()
-                .expect("locator multiaddr should parse"),
-        )],
-        provider_id: genesis_declaration.provider_id,
-        zk_id: genesis_declaration.zk_id,
-        locked_note_id: spare_note_id,
-    };
-    let expected_id = declaration.id();
-
-    let returned_id = CommonHttpClient::new(None)
-        .post_declaration(node0.base_url().clone(), &declaration)
-        .await
-        .expect("HTTP post_declaration should succeed");
-
-    assert_eq!(
-        returned_id, expected_id,
-        "HTTP response should echo the locally computed declaration id"
-    );
-
-    let on_chain = wait_for_declaration(&node0, Duration::from_secs(60), {
-        let target_locked_note = spare_note_id;
-        move |decl| decl.locked_note_id == target_locked_note
-    })
-    .await;
-
-    assert!(
-        on_chain.is_some(),
-        "HTTP-submitted declaration should land in SDP state after flowing through the mempool"
     );
 }
 

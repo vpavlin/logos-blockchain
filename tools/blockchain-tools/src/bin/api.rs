@@ -1,33 +1,23 @@
-use std::{
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
-    path::PathBuf,
-};
+use std::path::PathBuf;
 
-use anyhow::{Context as _, Result, anyhow, bail};
+use anyhow::{Context as _, Result};
 use clap::{Parser, Subcommand};
 use lb_common_http_client::{BasicAuthCredentials, CommonHttpClient};
 use lb_core::{
-    crypto::ZkHash,
     mantle::NoteId,
     sdp::{DeclarationId, DeclarationMessage, Locator, ProviderId, ServiceType},
 };
 use lb_http_api_common::paths::SDP_POST_DECLARATION;
 use lb_key_management_system_keys::keys::{Key, ZkPublicKey};
-use lb_libp2p::{
-    Multiaddr, PeerId, Protocol,
-    ed25519::{self, Keypair},
-    identity::PublicKey,
-};
+use lb_libp2p::Multiaddr;
 use lb_node::config::{OnUnknownKeys, UserConfig, deserialize_config_at_path};
-use serde::de::DeserializeOwned;
+use serde::{Deserialize, de::IntoDeserializer as _};
 use url::Url;
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<()> {
     let cli = Cli::parse();
-    match cli.command {
-        CliCommand::Sdp(command) => command.run().await,
-    }
+    cli.run().await
 }
 
 #[derive(Parser, Debug)]
@@ -38,33 +28,38 @@ struct Cli {
 }
 
 impl Cli {
-    async fn run(self) {
+    async fn run(self) -> Result<()> {
         self.command.run().await
     }
 }
 
 #[derive(Debug, Subcommand)]
 enum CliCommand {
-    Sdp(SdpSubCommand),
+    /// Service Declaration Protocol commands
+    Sdp {
+        #[command(subcommand)]
+        command: SdpSubCommand,
+    },
 }
 
 impl CliCommand {
-    async fn run(self) {
+    async fn run(self) -> Result<()> {
         match self {
-            CliCommand::Sdp(command) => command.run().await,
+            Self::Sdp { command } => command.run().await,
         }
     }
 }
 
 #[derive(Debug, Subcommand)]
 enum SdpSubCommand {
+    /// Post a service declaration to the node HTTP API
     PostDeclaration(PostDeclarationArgs),
 }
 
 impl SdpSubCommand {
-    async fn run(self) {
+    async fn run(self) -> Result<()> {
         match self {
-            SdpSubCommand::PostDeclaration(args) => post_declaration(args).await,
+            Self::PostDeclaration(args) => post_declaration(args).await,
         }
     }
 }
@@ -75,15 +70,15 @@ struct PostDeclarationArgs {
     service_type: ServiceType,
 
     #[arg(long)]
-    locator: Locator,
+    locator: Multiaddr,
 
     #[arg(long)]
     user_config_path: PathBuf,
 
-    #[arg(long)]
+    #[arg(long, value_parser = parse_hex_serde::<ZkPublicKey>)]
     zk_id: ZkPublicKey,
 
-    #[arg(long)]
+    #[arg(long, value_parser = parse_hex_serde::<NoteId>)]
     locked_note_id: NoteId,
 
     #[arg(long)]
@@ -94,6 +89,16 @@ struct PostDeclarationArgs {
 
     #[arg(long)]
     password: Option<String>,
+}
+
+fn parse_hex_serde<T>(input: &str) -> Result<T, String>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    use serde::de::value::Error;
+
+    T::deserialize(input.into_deserializer())
+        .map_err(|e: Error| format!("Failed to parse input HEX string: {e}"))
 }
 
 async fn post_declaration(
@@ -107,20 +112,20 @@ async fn post_declaration(
         username,
         password,
     }: PostDeclarationArgs,
-) {
+) -> Result<()> {
     let user_config =
-        deserialize_config_at_path::<UserConfig>(&user_config_path, OnUnknownKeys::Fail).expect(
-            format!(
-                "failed to read user config at '{}'",
-                user_config_path.display()
-            )
-            .as_str(),
-        );
+        deserialize_config_at_path::<UserConfig>(&user_config_path, OnUnknownKeys::Fail)
+            .with_context(|| {
+                format!(
+                    "failed to read user config at '{}'",
+                    user_config_path.display()
+                )
+            })?;
 
-    let UserConfigValues { provider_id } = extract_values(user_config);
+    let UserConfigValues { provider_id } = extract_values(&user_config);
 
     let declaration = DeclarationMessage {
-        locators: vec![locator],
+        locators: vec![Locator::new(locator)],
         locked_note_id,
         provider_id,
         service_type,
@@ -129,7 +134,7 @@ async fn post_declaration(
 
     let request_url = node_address
         .join(SDP_POST_DECLARATION.trim_start_matches('/'))
-        .expect("Invalid node address provided.");
+        .context("invalid node address provided")?;
 
     let client = {
         let credentials = username.map(|u| BasicAuthCredentials::new(u, password));
@@ -139,16 +144,18 @@ async fn post_declaration(
     let declaration_id: DeclarationId = client
         .post(request_url, &declaration)
         .await
-        .inspect_err(|e| {
-            eprintln!("Failed to post declaration: {e}");
-        })
-        .unwrap();
+        .context("failed to post declaration")?;
 
     println!("{declaration_id}");
+    Ok(())
 }
 
-fn extract_values(config: UserConfig) -> UserConfigValues {
-    let provider_id = extract_blend_provider_id(&config);
+struct UserConfigValues {
+    provider_id: ProviderId,
+}
+
+fn extract_values(config: &UserConfig) -> UserConfigValues {
+    let provider_id = extract_blend_provider_id(config);
     UserConfigValues { provider_id }
 }
 
@@ -165,33 +172,4 @@ fn extract_blend_provider_id(config: &UserConfig) -> ProviderId {
     };
     let blend_public_key = blend_secret_key.public_key();
     ProviderId(blend_public_key)
-}
-
-struct UserConfigValues {
-    provider_id: ProviderId,
-}
-
-fn parse_service_type(input: &str) -> Result<ServiceType> {
-    match input {
-        "BN" => Ok(ServiceType::BlendNetwork),
-        _ => bail!("unsupported service_type '{input}', expected 'BN'"),
-    }
-}
-
-fn api_base_url_from_user_config(config: &UserConfig) -> Result<Url> {
-    let listen_address = config.api.backend.listen_address;
-
-    let host_ip = match listen_address.ip() {
-        IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
-        IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
-        ip => ip,
-    };
-
-    let target = SocketAddr::new(host_ip, listen_address.port());
-    Url::parse(&format!("http://{target}")).with_context(|| {
-        format!(
-            "invalid api.listen_address '{}': cannot build URL",
-            listen_address
-        )
-    })
 }

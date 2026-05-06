@@ -154,11 +154,11 @@ impl LedgerState {
         epoch_state: &EpochState,
         voucher: VoucherCm,
         config: &Config,
-    ) -> Result<(Self, Vec<Utxo>), Error> {
+    ) -> Result<Self, Error> {
         self.leaders = self.leaders.try_apply_header(epoch_state.epoch, voucher)?;
-        let (new_sdp, reward_utxos) = self.sdp.try_apply_header(&config.sdp_config, epoch_state)?;
+        let new_sdp = self.sdp.try_apply_header(&config.sdp_config, epoch_state)?;
         self.sdp = new_sdp;
-        Ok((self, reward_utxos))
+        Ok(self)
     }
 
     pub fn try_apply_channel_inscription(
@@ -237,7 +237,7 @@ impl LedgerState {
     ) -> Result<Self, Error> {
         self.sdp = self
             .sdp
-            .apply_active_msg(
+            .try_apply_active_msg(
                 sdp_active_op,
                 sdp_active_zk_sig,
                 tx_hash,
@@ -258,7 +258,7 @@ impl LedgerState {
     ) -> Result<Self, Error> {
         self.sdp = self
             .sdp
-            .apply_withdrawn_msg(
+            .try_apply_withdrawn_msg(
                 sdp_withdraw_op,
                 sdp_withdraw_zk_sig,
                 tx_hash,

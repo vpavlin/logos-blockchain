@@ -21,7 +21,17 @@ use tokio::time::{Interval, MissedTickBehavior};
 pub struct Slot(u64);
 
 #[derive(
-    Clone, Debug, Eq, PartialEq, Copy, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+    Clone,
+    Debug,
+    Eq,
+    PartialEq,
+    Copy,
+    Hash,
+    PartialOrd,
+    Ord,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
 )]
 pub struct Epoch(u32);
 

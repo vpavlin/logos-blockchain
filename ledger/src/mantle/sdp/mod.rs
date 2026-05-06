@@ -6,7 +6,7 @@ use lb_blend_message::crypto::proofs::RealProofsVerifier;
 use lb_core::{
     block::BlockNumber,
     mantle::{
-        NoteId, OpProof, TxHash, Utxo, Value,
+        NoteId, OpProof, TxHash, Value,
         ledger::Operation as _,
         ops::sdp::{
             SDPActiveExecutionContext, SDPActiveOp, SDPActiveValidationContext,
@@ -19,9 +19,9 @@ use lb_core::{
         ServiceParameters, ServiceType, SessionNumber, locked_notes, locked_notes::LockedNotes,
     },
 };
+use lb_cryptarchia_engine::Epoch;
 use lb_key_management_system_keys::keys::{Ed25519Signature, ZkSignature};
 use rewards::{Error as RewardsError, Rewards};
-use tracing::warn;
 
 use crate::{EpochState, UtxoTree, mantle::sdp::rewards::blend};
 
@@ -33,22 +33,18 @@ enum Service {
 }
 
 impl Service {
-    fn try_apply_header(
+    fn apply_header(
         self,
         block_number: BlockNumber,
         epoch_state: &EpochState,
         config: &ServiceParameters,
         rewards_params: &ServiceRewardsParameters,
-    ) -> (Self, Vec<Utxo>) {
+    ) -> Self {
         match self {
             Self::BlendNetwork(state) => {
-                let (new_state, utxos) = state.try_apply_header(
-                    block_number,
-                    epoch_state,
-                    config,
-                    &rewards_params.blend,
-                );
-                (Self::BlendNetwork(new_state), utxos)
+                let new_state =
+                    state.apply_header(block_number, epoch_state, config, &rewards_params.blend);
+                Self::BlendNetwork(new_state)
             }
         }
     }
@@ -176,6 +172,7 @@ pub enum Error {
 pub struct SessionState {
     pub declarations: Declarations,
     pub session_n: u64,
+    pub epoch_n: Epoch,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -194,23 +191,6 @@ struct ServiceState<R: Rewards> {
     pub rewards: R,
 }
 
-impl SessionState {
-    fn update<R: Rewards>(
-        &self,
-        service_state: &ServiceState<R>,
-        block_number: u64,
-        config: &ServiceParameters,
-    ) -> Self {
-        if self.session_n.saturating_sub(1) * config.session_duration > block_number {
-            return Self {
-                session_n: self.session_n,
-                declarations: service_state.declarations.clone(),
-            };
-        }
-        self.clone()
-    }
-}
-
 const fn is_active(
     declaration: &Declaration,
     current_block: u64,
@@ -222,62 +202,64 @@ const fn is_active(
 }
 
 impl<R: Rewards> ServiceState<R> {
-    fn try_apply_header(
+    fn apply_header(
         mut self,
         block_number: u64,
         epoch_state: &EpochState,
         service_params: &ServiceParameters,
         rewards_params: &R::Params,
-    ) -> (Self, Vec<Utxo>) {
-        let current_session = service_params.session_for_block(block_number);
-        let reward_utxos;
+    ) -> Self {
+        self.rewards = self.rewards.update_epoch(epoch_state, rewards_params);
 
-        // shift all session!
-        if current_session == self.active.session_n + 1 {
-            // Remove expired declarations based on retention_period
-            // This essentially duplicates the declaration set so it's only triggered at
-            // session boundaries
-            self.declarations = self
-                .declarations
-                .iter()
-                .filter(|(_id, declaration)| {
-                    let active = is_active(declaration, block_number, service_params);
-                    if !active {
-                        warn!(
-                            provider_id = ?declaration.provider_id,
-                            latest_active_block = declaration.active,
-                            current_block = block_number,
-                            "removing declaration due to inactivity+retention"
-                        );
-                    }
-                    active
-                })
-                .map(|(id, declaration)| (*id, declaration.clone()))
-                .collect();
+        self
 
-            // Update rewards with current session state and distribute rewards
-            (self.rewards, reward_utxos) = self.rewards.update_session(
-                &self.active,
-                epoch_state,
-                service_params,
-                rewards_params,
-            );
-            self.active = self.forming.clone();
-            self.forming = SessionState {
-                declarations: self.declarations.clone(),
-                session_n: self.forming.session_n + 1,
-            };
-        } else {
-            assert!(
-                current_session < self.active.session_n + 1,
-                "Logos blockchain isn't ready for time travel yet"
-            );
-            self.rewards = self.rewards.update_epoch(epoch_state, rewards_params);
-            self.forming = self.forming.update(&self, block_number, service_params);
-            reward_utxos = Vec::new();
-        }
+        // // shift all session!
+        // if current_session == self.active.session_n + 1 {
+        //     // Remove expired declarations based on retention_period
+        //     // This essentially duplicates the declaration set so it's only
+        // triggered at     // session boundaries
+        //     self.declarations = self
+        //         .declarations
+        //         .iter()
+        //         .filter(|(_id, declaration)| {
+        //             let active = is_active(declaration, block_number,
+        // service_params);             if !active {
+        //                 warn!(
+        //                     provider_id = ?declaration.provider_id,
+        //                     latest_active_block = declaration.active,
+        //                     current_block = block_number,
+        //                     "removing declaration due to
+        // inactivity+retention"                 );
+        //             }
+        //             active
+        //         })
+        //         .map(|(id, declaration)| (*id, declaration.clone()))
+        //         .collect();
 
-        (self, reward_utxos)
+        //     // Update rewards with current session state and distribute
+        // rewards     (self.rewards, reward_utxos) =
+        // self.rewards.update_session(         &self.active,
+        //         epoch_state,
+        //         service_params,
+        //         rewards_params,
+        //     );
+        //     self.active = self.forming.clone();
+        //     self.forming = SessionState {
+        //         declarations: self.declarations.clone(),
+        //         session_n: self.forming.session_n + 1,
+        //     };
+        // } else {
+        //     assert!(
+        //         current_session < self.active.session_n + 1,
+        //         "Logos blockchain isn't ready for time travel yet"
+        //     );
+        //     self.rewards = self.rewards.update_epoch(epoch_state,
+        // rewards_params);     self.forming =
+        // self.forming.update(&self, block_number, service_params);
+        //     reward_utxos = Vec::new();
+        // }
+
+        // self
     }
 
     fn add_income(&mut self, income: Value) {
@@ -297,7 +279,9 @@ impl<R: Rewards> ServiceState<R> {
 pub struct SdpLedger {
     services: rpds::HashTrieMapSync<ServiceType, Service>,
     locked_notes: LockedNotes,
+    // TODO: Remove once we reach a state where the code compiles
     block_number: u64,
+    epoch_number: Epoch,
 }
 
 impl SdpLedger {
@@ -307,6 +291,7 @@ impl SdpLedger {
             services: rpds::HashTrieMapSync::new_sync(),
             locked_notes: LockedNotes::new(),
             block_number: 0,
+            epoch_number: 0.into(),
         }
     }
 
@@ -317,6 +302,11 @@ impl SdpLedger {
         tx_hash: TxHash,
         ops: impl Iterator<Item = (&'a SDPDeclareOp, &'a OpProof)> + 'a,
     ) -> Result<Self, Error> {
+        assert_eq!(
+            epoch_state.epoch.into_inner(),
+            0,
+            "Genesis state can only be initialized at epoch 0"
+        );
         let mut sdp =
             Self::new().with_blend_service(&config.service_rewards_params.blend, epoch_state);
 
@@ -339,7 +329,6 @@ impl SdpLedger {
 
         let Service::BlendNetwork(state) = blend;
         state.active.declarations = state.declarations.clone();
-        state.forming.declarations = state.declarations.clone();
 
         Ok(sdp)
     }
@@ -365,11 +354,13 @@ impl SdpLedger {
             active: SessionState {
                 declarations: rpds::RedBlackTreeMapSync::new_sync(),
                 session_n: 0,
+                epoch_n: 0.into(),
             },
 
             forming: SessionState {
                 declarations: rpds::RedBlackTreeMapSync::new_sync(),
                 session_n: 1,
+                epoch_n: 1.into(),
             },
             rewards,
         }
@@ -379,9 +370,8 @@ impl SdpLedger {
         &self,
         config: &Config,
         epoch_state: &EpochState,
-    ) -> Result<(Self, Vec<Utxo>), Error> {
+    ) -> Result<Self, Error> {
         let block_number = self.block_number + 1; // overflow?
-        let mut all_reward_utxos = Vec::new();
 
         let services = self
             .services
@@ -391,25 +381,22 @@ impl SdpLedger {
                     .service_params
                     .get(service)
                     .ok_or(Error::SessionParamsNotFound(*service))?;
-                let (new_state, reward_utxos) = service_state.clone().try_apply_header(
+                let new_state = service_state.clone().apply_header(
                     block_number,
                     epoch_state,
                     service_params,
                     &config.service_rewards_params,
                 );
-                all_reward_utxos.extend(reward_utxos);
                 Ok::<_, Error>((*service, new_state))
             })
             .collect::<Result<_, _>>()?;
 
-        Ok((
-            Self {
-                block_number,
-                services,
-                locked_notes: self.locked_notes.clone(),
-            },
-            all_reward_utxos,
-        ))
+        Ok(Self {
+            block_number,
+            epoch_number: epoch_state.epoch,
+            services,
+            locked_notes: self.locked_notes.clone(),
+        })
     }
 
     pub fn try_apply_sdp_declaration(
@@ -450,7 +437,7 @@ impl SdpLedger {
         Ok(self)
     }
 
-    pub fn apply_active_msg(
+    pub fn try_apply_active_msg(
         mut self,
         op: &SDPActiveOp,
         zksig: &ZkSignature,
@@ -492,7 +479,7 @@ impl SdpLedger {
         Ok(self)
     }
 
-    pub fn apply_withdrawn_msg(
+    pub fn try_apply_withdrawn_msg(
         mut self,
         op: &SDPWithdrawOp,
         zksig: &ZkSignature,
@@ -639,7 +626,10 @@ impl SdpLedger {
 mod tests {
     use std::{num::NonZeroU64, sync::Arc};
 
-    use lb_core::{crypto::ZkHash, mantle::ledger::Utxos};
+    use lb_core::{
+        crypto::ZkHash,
+        mantle::{Utxo, ledger::Utxos},
+    };
     use lb_groth16::{Field as _, Fr};
     use lb_key_management_system_keys::keys::{Ed25519Key, ZkKey};
     use lb_utils::math::NonNegativeF64;
@@ -722,7 +712,7 @@ mod tests {
         let tx_hash = TxHash([1u8; 32]);
         let zk_sig = ZkKey::multi_sign(&[note_sk, zk_key], &tx_hash.to_fr()).unwrap();
 
-        sdp_ledger.apply_withdrawn_msg(op, &zk_sig, tx_hash, config)
+        sdp_ledger.try_apply_withdrawn_msg(op, &zk_sig, tx_hash, config)
     }
 
     fn dummy_epoch_state() -> EpochState {
@@ -771,7 +761,7 @@ mod tests {
         // Apply headers to reach block 10 (session boundary)
         let mut sdp_ledger = sdp_ledger;
         for _ in 0..10 {
-            (sdp_ledger, _) = sdp_ledger.try_apply_header(&config, &epoch_state).unwrap();
+            sdp_ledger = sdp_ledger.try_apply_header(&config, &epoch_state).unwrap();
         }
 
         // At block 10, declaration enters forming session 2
@@ -816,7 +806,7 @@ mod tests {
         // Move forward enough blocks to satisfy lock_period
         let mut sdp_ledger = sdp_ledger;
         for _ in 0..11 {
-            (sdp_ledger, _) = sdp_ledger.try_apply_header(&config, &epoch_state).unwrap();
+            sdp_ledger = sdp_ledger.try_apply_header(&config, &epoch_state).unwrap();
         }
 
         // Withdraw the declaration
@@ -865,7 +855,7 @@ mod tests {
         // Apply headers to reach block 10 (session boundary for session_duration=10)
         let mut sdp_ledger = sdp_ledger;
         for _ in 0..10 {
-            (sdp_ledger, _) = sdp_ledger.try_apply_header(&config, &epoch_state).unwrap();
+            sdp_ledger = sdp_ledger.try_apply_header(&config, &epoch_state).unwrap();
         }
 
         // At block 10: active becomes session 1 (was empty forming), forming becomes
@@ -881,7 +871,7 @@ mod tests {
 
         // Continue to block 20 to see declaration become active
         for _ in 0..10 {
-            (sdp_ledger, _) = sdp_ledger.try_apply_header(&config, &epoch_state).unwrap();
+            sdp_ledger = sdp_ledger.try_apply_header(&config, &epoch_state).unwrap();
         }
 
         // At block 20: active becomes session 2 (with declaration)
@@ -903,7 +893,7 @@ mod tests {
         // Apply headers to reach block 9 (still in session 0, promotion happens at
         // block 10)
         for _ in 0..9 {
-            (sdp_ledger, _) = sdp_ledger.try_apply_header(&config, &epoch_state).unwrap();
+            sdp_ledger = sdp_ledger.try_apply_header(&config, &epoch_state).unwrap();
         }
 
         // Check active session is still session 0 with no declarations
@@ -928,7 +918,7 @@ mod tests {
 
         // Apply headers to reach block 10 (session boundary for BlendNetwork)
         for _ in 0..10 {
-            (sdp_ledger, _) = sdp_ledger.try_apply_header(&config, &epoch_state).unwrap();
+            sdp_ledger = sdp_ledger.try_apply_header(&config, &epoch_state).unwrap();
         }
 
         // Check BlendNetwork is promoted to session 1
@@ -952,7 +942,7 @@ mod tests {
 
         // SESSION 0: Add a declaration at block 5
         for _ in 0..5 {
-            (sdp_ledger, _) = sdp_ledger.try_apply_header(&config, &epoch_state).unwrap();
+            sdp_ledger = sdp_ledger.try_apply_header(&config, &epoch_state).unwrap();
         }
 
         let utxo = utxo();
@@ -972,7 +962,7 @@ mod tests {
 
         // Move to block 9 (last block of session 0)
         for _ in 6..10 {
-            (sdp_ledger, _) = sdp_ledger.try_apply_header(&config, &epoch_state).unwrap();
+            sdp_ledger = sdp_ledger.try_apply_header(&config, &epoch_state).unwrap();
         }
         assert_eq!(sdp_ledger.block_number, 9);
 
@@ -986,7 +976,7 @@ mod tests {
         assert!(forming_session.declarations.is_empty());
 
         // SESSION 1: Cross session boundary to block 10
-        (sdp_ledger, _) = sdp_ledger.try_apply_header(&config, &epoch_state).unwrap();
+        sdp_ledger = sdp_ledger.try_apply_header(&config, &epoch_state).unwrap();
         assert_eq!(sdp_ledger.block_number, 10);
 
         // Active session 1 is empty (was the empty forming session 1)
@@ -1001,9 +991,9 @@ mod tests {
 
         // SESSION 2: Cross to block 20
         for _ in 11..20 {
-            (sdp_ledger, _) = sdp_ledger.try_apply_header(&config, &epoch_state).unwrap();
+            sdp_ledger = sdp_ledger.try_apply_header(&config, &epoch_state).unwrap();
         }
-        (sdp_ledger, _) = sdp_ledger.try_apply_header(&config, &epoch_state).unwrap();
+        sdp_ledger = sdp_ledger.try_apply_header(&config, &epoch_state).unwrap();
         assert_eq!(sdp_ledger.block_number, 20);
 
         // Now the declaration is active in session 2
@@ -1041,14 +1031,14 @@ mod tests {
 
         // Move to block 9 (last block before session boundary)
         for _ in 1..10 {
-            (sdp_ledger, _) = sdp_ledger.try_apply_header(&config, &epoch_state).unwrap();
+            sdp_ledger = sdp_ledger.try_apply_header(&config, &epoch_state).unwrap();
         }
 
         // Save state at block 9
         let sdp_ledger_block_9 = sdp_ledger.clone();
 
         // Add another declaration at block 10 (after session boundary)
-        (sdp_ledger, _) = sdp_ledger.try_apply_header(&config, &epoch_state).unwrap();
+        sdp_ledger = sdp_ledger.try_apply_header(&config, &epoch_state).unwrap();
         assert_eq!(sdp_ledger.block_number, 10);
 
         let zk_key_2 = create_zk_key(2);
@@ -1069,9 +1059,9 @@ mod tests {
 
         // Jump to session 2 (block 20)
         for _ in 11..20 {
-            (sdp_ledger, _) = sdp_ledger.try_apply_header(&config, &epoch_state).unwrap();
+            sdp_ledger = sdp_ledger.try_apply_header(&config, &epoch_state).unwrap();
         }
-        (sdp_ledger, _) = sdp_ledger.try_apply_header(&config, &epoch_state).unwrap();
+        sdp_ledger = sdp_ledger.try_apply_header(&config, &epoch_state).unwrap();
 
         // Active session (session 2) should contain both declarations
         let active_session = sdp_ledger.get_active_session(service_a).unwrap();
@@ -1081,11 +1071,11 @@ mod tests {
         // Now test from the block 9 state - jumping directly to block 20
         let mut sdp_ledger_from_9 = sdp_ledger_block_9;
         for _ in 10..20 {
-            (sdp_ledger_from_9, _) = sdp_ledger_from_9
+            sdp_ledger_from_9 = sdp_ledger_from_9
                 .try_apply_header(&config, &epoch_state)
                 .unwrap();
         }
-        (sdp_ledger_from_9, _) = sdp_ledger_from_9
+        sdp_ledger_from_9 = sdp_ledger_from_9
             .try_apply_header(&config, &epoch_state)
             .unwrap();
 
@@ -1117,7 +1107,7 @@ mod tests {
 
         // Add declaration at block 3
         for _ in 0..3 {
-            (sdp_ledger, _) = sdp_ledger.try_apply_header(&config, &epoch_state).unwrap();
+            sdp_ledger = sdp_ledger.try_apply_header(&config, &epoch_state).unwrap();
         }
 
         let utxo = utxo();
@@ -1137,9 +1127,9 @@ mod tests {
 
         // Jump directly from block 3 to block 25 (skipping session 1 entirely)
         for _ in 4..25 {
-            (sdp_ledger, _) = sdp_ledger.try_apply_header(&config, &epoch_state).unwrap();
+            sdp_ledger = sdp_ledger.try_apply_header(&config, &epoch_state).unwrap();
         }
-        (sdp_ledger, _) = sdp_ledger.try_apply_header(&config, &epoch_state).unwrap();
+        sdp_ledger = sdp_ledger.try_apply_header(&config, &epoch_state).unwrap();
         assert_eq!(sdp_ledger.block_number, 25);
 
         // Declaration snapshots should be taken from the last known state
@@ -1171,7 +1161,7 @@ mod tests {
 
         // Move to block 9 (last block of session 0)
         for _ in 0..9 {
-            (sdp_ledger, _) = sdp_ledger.try_apply_header(&config, &epoch_state).unwrap();
+            sdp_ledger = sdp_ledger.try_apply_header(&config, &epoch_state).unwrap();
         }
         assert_eq!(sdp_ledger.block_number, 9);
 
@@ -1201,7 +1191,7 @@ mod tests {
 
         // Cross to block 10 (session boundary - start of session 1)
         // At this point, the snapshot for forming session 2 is taken
-        (sdp_ledger, _) = sdp_ledger.try_apply_header(&config, &epoch_state).unwrap();
+        sdp_ledger = sdp_ledger.try_apply_header(&config, &epoch_state).unwrap();
         assert_eq!(sdp_ledger.block_number, 10);
 
         let active_session = sdp_ledger.get_active_session(service_a).unwrap();
@@ -1239,9 +1229,9 @@ mod tests {
 
         // Jump to block 20 (start of session 2)
         for _ in 11..20 {
-            (sdp_ledger, _) = sdp_ledger.try_apply_header(&config, &epoch_state).unwrap();
+            sdp_ledger = sdp_ledger.try_apply_header(&config, &epoch_state).unwrap();
         }
-        (sdp_ledger, _) = sdp_ledger.try_apply_header(&config, &epoch_state).unwrap();
+        sdp_ledger = sdp_ledger.try_apply_header(&config, &epoch_state).unwrap();
         assert_eq!(sdp_ledger.block_number, 20);
 
         // Active session 2 has declaration_1 (from block 9)
@@ -1258,9 +1248,9 @@ mod tests {
 
         // Jump to block 30 (start of session 3)
         for _ in 21..30 {
-            (sdp_ledger, _) = sdp_ledger.try_apply_header(&config, &epoch_state).unwrap();
+            sdp_ledger = sdp_ledger.try_apply_header(&config, &epoch_state).unwrap();
         }
-        (sdp_ledger, _) = sdp_ledger.try_apply_header(&config, &epoch_state).unwrap();
+        sdp_ledger = sdp_ledger.try_apply_header(&config, &epoch_state).unwrap();
         assert_eq!(sdp_ledger.block_number, 30);
 
         // Active session 3 now has both declarations

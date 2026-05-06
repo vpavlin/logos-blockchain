@@ -52,23 +52,19 @@ impl CliCommand {
 
 #[derive(Debug, Subcommand)]
 enum SdpSubCommand {
-    /// Post a service declaration to the node HTTP API
-    PostDeclaration(PostDeclarationArgs),
+    PostBlendDeclaration(PostBlendDeclarationArgs),
 }
 
 impl SdpSubCommand {
     async fn run(self) -> Result<()> {
         match self {
-            Self::PostDeclaration(args) => post_declaration(args).await,
+            Self::PostBlendDeclaration(args) => post_blend_declaration(args).await,
         }
     }
 }
 
 #[derive(Debug, Parser)]
-struct PostDeclarationArgs {
-    #[arg(long)]
-    service_type: ServiceType,
-
+struct PostBlendDeclarationArgs {
     #[arg(long)]
     locator: Multiaddr,
 
@@ -101,17 +97,16 @@ where
         .map_err(|e: Error| format!("Failed to parse input HEX string: {e}"))
 }
 
-async fn post_declaration(
-    PostDeclarationArgs {
+async fn post_blend_declaration(
+    PostBlendDeclarationArgs {
         locator,
         locked_note_id,
         node_address,
-        service_type,
         user_config_path,
         zk_id,
         username,
         password,
-    }: PostDeclarationArgs,
+    }: PostBlendDeclarationArgs,
 ) -> Result<()> {
     let user_config =
         deserialize_config_at_path::<UserConfig>(&user_config_path, OnUnknownKeys::Fail)
@@ -122,19 +117,19 @@ async fn post_declaration(
                 )
             })?;
 
-    let UserConfigValues { provider_id } = extract_values(&user_config);
+    let UserConfigValues { provider_id } = extract_values(&user_config)?;
 
     let declaration = DeclarationMessage {
         locators: vec![Locator::new(locator)],
         locked_note_id,
         provider_id,
-        service_type,
+        service_type: ServiceType::BlendNetwork,
         zk_id,
     };
 
     let request_url = node_address
         .join(SDP_POST_DECLARATION.trim_start_matches('/'))
-        .context("invalid node address provided")?;
+        .context("Invalid node address provided")?;
 
     let client = {
         let credentials = username.map(|u| BasicAuthCredentials::new(u, password));
@@ -144,7 +139,8 @@ async fn post_declaration(
     let declaration_id: DeclarationId = client
         .post(request_url, &declaration)
         .await
-        .context("failed to post declaration")?;
+        .inspect_err(|e| eprintln!("Failed to post declaration. Error: {e}"))
+        .unwrap();
 
     println!("{declaration_id}");
     Ok(())
@@ -154,22 +150,19 @@ struct UserConfigValues {
     provider_id: ProviderId,
 }
 
-fn extract_values(config: &UserConfig) -> UserConfigValues {
-    let provider_id = extract_blend_provider_id(config);
-    UserConfigValues { provider_id }
+fn extract_values(config: &UserConfig) -> Result<UserConfigValues> {
+    let provider_id = extract_blend_provider_id(config)?;
+    Ok(UserConfigValues { provider_id })
 }
 
-fn extract_blend_provider_id(config: &UserConfig) -> ProviderId {
-    let blend_secret_key_id = &config.blend.non_ephemeral_signing_key_id;
-    let Key::Ed25519(blend_secret_key) = config
-        .kms
-        .backend
-        .keys
-        .get(blend_secret_key_id)
-        .expect("Failed to find Blend non-ephemeral signing key in user config KMS keys.")
-    else {
-        panic!("Blend non-ephemeral signing key must be an Ed25519 key.")
+fn extract_blend_provider_id(config: &UserConfig) -> Result<ProviderId> {
+    let key_id = &config.blend.non_ephemeral_signing_key_id;
+    let key =
+        config.kms.backend.keys.get(key_id).with_context(|| {
+            format!("blend non-ephemeral signing key '{key_id}' not found in KMS")
+        })?;
+    let Key::Ed25519(secret_key) = key else {
+        anyhow::bail!("blend non-ephemeral signing key must be Ed25519");
     };
-    let blend_public_key = blend_secret_key.public_key();
-    ProviderId(blend_public_key)
+    Ok(ProviderId(secret_key.public_key()))
 }

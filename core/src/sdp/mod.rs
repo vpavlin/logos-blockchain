@@ -1,7 +1,6 @@
 pub mod blend;
 pub mod locked_notes;
 
-use core::str::FromStr;
 use std::hash::Hash;
 
 use blake2::{Blake2b, Digest as _};
@@ -71,17 +70,6 @@ impl AsRef<str> for ServiceType {
     fn as_ref(&self) -> &str {
         match self {
             Self::BlendNetwork => "BN",
-        }
-    }
-}
-
-impl FromStr for ServiceType {
-    type Err = &'static str;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "BN" => Ok(Self::BlendNetwork),
-            _ => Err("Invalid String-encoded service type."),
         }
     }
 }

@@ -4996,14 +4996,26 @@ version = "0.1.2"
 dependencies = [
  "anyhow",
  "clap",
+ "logos-blockchain-common-http-client",
  "logos-blockchain-core",
+<<<<<<< HEAD
  "logos-blockchain-key-management-system-keys",
+=======
+ "logos-blockchain-http-api-common",
+ "logos-blockchain-key-management-system-keys",
+ "logos-blockchain-libp2p",
+>>>>>>> f2569ffc7 (WIP)
  "logos-blockchain-node",
  "num-bigint",
  "serde",
  "serde_json",
  "serde_yml",
+<<<<<<< HEAD
  "thiserror 2.0.18",
+=======
+ "tokio",
+ "url",
+>>>>>>> f2569ffc7 (WIP)
 ]
 
 [[package]]

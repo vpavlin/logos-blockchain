@@ -20,7 +20,12 @@ async fn main() -> Result<()> {
 }
 
 #[derive(Parser, Debug)]
-#[command(author, version, about = "Logos blockchain HTTP API utility")]
+#[command(
+    author,
+    version,
+    about = "Logos blockchain HTTP API utility",
+    long_about = "Utilities for interacting with node HTTP APIs from the command line."
+)]
 struct Cli {
     #[command(subcommand)]
     command: CliCommand,
@@ -34,6 +39,7 @@ impl Cli {
 
 #[derive(Debug, Subcommand)]
 enum CliCommand {
+    /// Service Declaration Protocol (SDP) operations.
     Sdp {
         #[command(subcommand)]
         command: SdpSubCommand,
@@ -50,6 +56,16 @@ impl CliCommand {
 
 #[derive(Debug, Subcommand)]
 enum SdpSubCommand {
+    /// Post a Blend SDP declaration using values extracted from the user
+    /// config.
+    ///
+    /// The command derives the following from `--user-config-path`:
+    /// - `provider_id` (from Blend non-ephemeral signing key)
+    /// - `zk_id` (from Blend core ZK key)
+    /// - `locator` (from Blend core listening address)
+    ///
+    /// It then validates that `--locked-note-id` exists for that ZK key before
+    /// submitting the declaration.
     PostBlendDeclaration(PostBlendDeclarationArgs),
 }
 
@@ -63,19 +79,24 @@ impl SdpSubCommand {
 
 #[derive(Debug, Parser)]
 struct PostBlendDeclarationArgs {
-    #[arg(long)]
+    /// Path to the node user config YAML file.
+    #[arg(long, value_name = "USER_CONFIG_YAML")]
     user_config_path: PathBuf,
 
-    #[arg(long, value_parser = parse_hex_serde::<NoteId>)]
+    /// Note ID to lock for the Blend declaration (HEX-encoded field element).
+    #[arg(long, value_name = "NOTE_ID_HEX", value_parser = parse_hex_serde::<NoteId>)]
     locked_note_id: NoteId,
 
-    #[arg(long)]
+    /// Base node URL, for example `http://localhost:8080`.
+    #[arg(long, value_name = "NODE_URL")]
     node_address: Url,
 
-    #[arg(long)]
+    /// Optional basic auth username for the API.
+    #[arg(long, value_name = "USERNAME")]
     username: Option<String>,
 
-    #[arg(long)]
+    /// Optional basic auth password for the API.
+    #[arg(long, value_name = "PASSWORD")]
     password: Option<String>,
 }
 
@@ -151,6 +172,8 @@ async fn extract_values(
     config: &UserConfig,
     locked_note_id: NoteId,
 ) -> Result<ExtractedUserConfigValues> {
+    // Keep all config-derived declaration fields in one place so the CLI and
+    // node service remain aligned on identity/key source semantics.
     let locator = extract_blend_locator(config);
 
     let provider_id = extract_blend_provider_id(config)
@@ -211,8 +234,9 @@ async fn verify_locked_note_id_value(
         .await
         .context("Failed to fetch wallet balance for Blend ZK ID")?;
 
-    // TODO: Harden this check by making sure the value of the locked note is at
-    // least as large as the required minimum stake for Blend.
+    // Preflight guard: fail early when the provided note does not belong to the
+    // declaration ZK key according to the wallet view at `node_address`.
+    // TODO: Also verify minimum stake amount once that threshold is exposed here.
     if !notes.contains_key(&locked_note_id) {
         bail!(
             "Locked note ID '{locked_note_id:?}' was not found in wallet notes for provided Blend ZK ID",

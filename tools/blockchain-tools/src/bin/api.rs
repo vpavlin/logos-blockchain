@@ -5,9 +5,8 @@ use clap::{Parser, Subcommand};
 use lb_common_http_client::{BasicAuthCredentials, CommonHttpClient};
 use lb_core::{
     mantle::NoteId,
-    sdp::{DeclarationId, DeclarationMessage, Locator, ProviderId, ServiceType},
+    sdp::{DeclarationMessage, Locator, ProviderId, ServiceType},
 };
-use lb_http_api_common::paths::SDP_POST_DECLARATION;
 use lb_key_management_system_keys::keys::{Key, ZkPublicKey};
 use lb_libp2p::Multiaddr;
 use lb_node::config::{OnUnknownKeys, UserConfig, deserialize_config_at_path};
@@ -117,7 +116,7 @@ async fn post_blend_declaration(
                 )
             })?;
 
-    let UserConfigValues { provider_id } = extract_values(&user_config)?;
+    let provider_id = extract_blend_provider_id(&user_config)?;
 
     let declaration = DeclarationMessage {
         locators: vec![Locator::new(locator)],
@@ -127,32 +126,18 @@ async fn post_blend_declaration(
         zk_id,
     };
 
-    let request_url = node_address
-        .join(SDP_POST_DECLARATION.trim_start_matches('/'))
-        .context("Invalid node address provided")?;
-
     let client = {
         let credentials = username.map(|u| BasicAuthCredentials::new(u, password));
         CommonHttpClient::new(credentials)
     };
 
-    let declaration_id: DeclarationId = client
-        .post(request_url, &declaration)
+    let declaration_id = client
+        .post_declaration(node_address, &declaration)
         .await
-        .inspect_err(|e| eprintln!("Failed to post declaration. Error: {e}"))
-        .unwrap();
+        .context("Failed to post declaration")?;
 
     println!("{declaration_id}");
     Ok(())
-}
-
-struct UserConfigValues {
-    provider_id: ProviderId,
-}
-
-fn extract_values(config: &UserConfig) -> Result<UserConfigValues> {
-    let provider_id = extract_blend_provider_id(config)?;
-    Ok(UserConfigValues { provider_id })
 }
 
 fn extract_blend_provider_id(config: &UserConfig) -> Result<ProviderId> {
